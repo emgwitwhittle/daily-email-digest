@@ -1,0 +1,43 @@
+name: Daily Email Digest
+
+on:
+  schedule:
+    - cron: '0 15 * * *'   # 7:00 AM Pacific (15:00 UTC) — adjusts automatically for daylight saving
+  workflow_dispatch:         # allows you to trigger manually from GitHub as a test
+
+jobs:
+  run-digest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore Gmail token
+        run: echo '${{ secrets.GMAIL_TOKEN }}' > token.json
+
+      - name: Run digest
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python digest.py
+
+      - name: Save updated Gmail token
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const token = fs.readFileSync('token.json', 'utf8');
+            await github.rest.actions.createOrUpdateRepoSecret({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              secret_name: 'GMAIL_TOKEN',
+              encrypted_value: await require('@actions/core').exportVariable || token
+            });
