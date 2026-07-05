@@ -1,12 +1,12 @@
 """
 Daily Email Digest
-Reads Gmail newsletters, summarizes via Claude API, sends digest to Elizabeth.
+Reads Gmail newsletters, summarizes via Claude API, sends digest to Elizabeth,
+then moves processed emails to the Newsletters label.
 """
 
 import os
 import base64
 import json
-import re
 from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -19,28 +19,25 @@ from googleapiclient.discovery import build
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-RECIPIENT_EMAIL = "elizabeth@wit-whittle.com"
-SENDER_NAME     = "Daily Digest"
-LOOKBACK_DAYS   = 3       # fallback if no state file exists
-MAX_EMAILS      = 50
-STATE_FILE      = "last_run.txt"   # tracks the date of the last digest
+RECIPIENT_EMAIL  = "elizabeth@wit-whittle.com"
+SENDER_NAME      = "Daily Digest"
+LOOKBACK_DAYS    = 3
+MAX_EMAILS       = 50
+STATE_FILE       = "last_run.txt"
+NEWSLETTER_LABEL = "Newsletters"
 
 GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.modify",
 ]
 
 # ── Gmail helpers ─────────────────────────────────────────────────────────────
 
 def get_gmail_service():
-    """Authenticate and return a Gmail API service object."""
     creds = None
-
-    # Load saved credentials if they exist
     if os.path.exists("token.json"):
         creds = Credentials.from_authorized_user_file("token.json", GMAIL_SCOPES)
-
-    # Refresh or re-authorize if needed
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
@@ -49,12 +46,18 @@ def get_gmail_service():
             creds = flow.run_local_server(port=0)
         with open("token.json", "w") as f:
             f.write(creds.to_json())
-
     return build("gmail", "v1", credentials=creds)
 
 
+def get_label_id(service, label_name):
+    results = service.users().labels().list(userId="me").execute()
+    for label in results.get("labels", []):
+        if label["name"].lower() == label_name.lower():
+            return label["id"]
+    raise ValueError(f"Label '{label_name}' not found in Gmail. Please create it first.")
+
+
 def get_message_body(msg_data):
-    """Extract plain text or HTML body from a Gmail message."""
     payload = msg_data.get("payload", {})
 
     def extract_parts(parts):
@@ -84,7 +87,6 @@ def get_message_body(msg_data):
 
 
 def fetch_emails(service, after_date_str):
-    """Fetch up to MAX_EMAILS messages from inbox after the given date."""
     query = f"after:{after_date_str} -in:sent -in:drafts"
     results = service.users().messages().list(
         userId="me", q=query, maxResults=MAX_EMAILS
@@ -101,11 +103,11 @@ def fetch_emails(service, after_date_str):
         headers = {h["name"]: h["value"] for h in msg_data.get("payload", {}).get("headers", [])}
         body    = get_message_body(msg_data)
 
-        # Truncate very long bodies to keep Claude's context manageable
         if len(body) > 4000:
             body = body[:4000] + "\n\n[truncated]"
 
         emails.append({
+            "id":      m["id"],
             "subject": headers.get("Subject", "(no subject)"),
             "from":    headers.get("From", "(unknown sender)"),
             "date":    headers.get("Date", ""),
@@ -115,10 +117,22 @@ def fetch_emails(service, after_date_str):
     return emails
 
 
+def move_to_newsletters(service, message_ids, label_id):
+    for msg_id in message_ids:
+        service.users().messages().modify(
+            userId="me",
+            id=msg_id,
+            body={
+                "addLabelIds":    [label_id],
+                "removeLabelIds": ["INBOX"],
+            }
+        ).execute()
+    print(f"📁 Moved {len(message_ids)} emails to Newsletters label")
+
+
 # ── Date state helpers ────────────────────────────────────────────────────────
 
 def get_last_run_date():
-    """Return the date of the last successful digest, or a fallback."""
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE) as f:
             raw = f.read().strip()
@@ -143,14 +157,14 @@ Below is a list of emails received since the last digest. Your job is to:
 1. Filter to newsletters, digests, blog updates, product announcements, and industry news.
    Skip: transactional emails, direct personal messages, calendar invites, spam, and any banking or financial institution emails.
 
-2. Analyze and group topics. Flag any topic or theme that appears in 2 or more different sources — these cross-source signals are important.
+2. Analyze and group topics. Flag any topic or theme that appears in 2 or more different sources.
 
 3. Organize the digest into three sections:
 
    🔥 Top Stories — Items highly relevant to Elizabeth's primary interests (AI / Tech / No-code tools / Higher education),
-   OR items appearing in multiple sources. List the 5–8 most important with:
+   OR items appearing in multiple sources. List the 5-8 most important with:
    - Topic headline
-   - Why it matters in 1–2 sentences
+   - Why it matters in 1-2 sentences
    - Which source(s) covered it (sender name and email)
    - A link if one was included in the email
 
@@ -158,16 +172,16 @@ Below is a list of emails received since the last digest. Your job is to:
 
    📬 Everything Else — Compact list of other newsletters. For each: sender name, sender email, one-line summary, link if available.
 
-4. Format the output as clean, readable HTML — good font, clear section headers, subtle color for section labels, links styled as clickable.
-   Keep it scannable. Elizabeth should be able to read the whole digest in under 5 minutes.
+4. Format as clean readable HTML — good font, clear section headers, subtle color, links styled as clickable.
+   Keep it scannable. Elizabeth should read the whole thing in under 5 minutes.
 
-5. At the top, note the date range covered (e.g. "Covering emails from May 20–25, 2026").
+5. At the top, note the date range covered.
 
 Constraints:
-- Do NOT include full article text — summaries and key points only.
-- Do NOT include any banking or financial emails anywhere.
+- Summaries and key points only — no full article text.
+- No banking or financial emails anywhere.
 - Always show sender name and email for every item.
-- If fewer than 3 newsletters are found, note that and still produce the digest.
+- If fewer than 3 newsletters found, note that and still produce the digest.
 
 Here are the emails:
 
@@ -176,10 +190,9 @@ Here are the emails:
 
 
 def generate_digest(emails, date_range_str):
-    """Call Claude API to generate the digest HTML."""
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-
-    emails_json = json.dumps(emails, indent=2)
+    emails_for_claude = [{k: v for k, v in e.items() if k != "id"} for e in emails]
+    emails_json = json.dumps(emails_for_claude, indent=2)
     prompt = DIGEST_PROMPT.format(emails_json=emails_json)
 
     message = client.messages.create(
@@ -187,14 +200,12 @@ def generate_digest(emails, date_range_str):
         max_tokens=4096,
         messages=[{"role": "user", "content": prompt}],
     )
-
     return message.content[0].text
 
 
 # ── Send email ────────────────────────────────────────────────────────────────
 
 def send_digest_email(service, html_body, today):
-    """Send the digest as an HTML email."""
     msg = MIMEMultipart("alternative")
     msg["Subject"] = f"Daily Digest — {today.strftime('%A, %B %-d, %Y')}"
     msg["From"]    = f"{SENDER_NAME} <{RECIPIENT_EMAIL}>"
@@ -206,7 +217,6 @@ def send_digest_email(service, html_body, today):
     service.users().messages().send(
         userId="me", body={"raw": raw}
     ).execute()
-
     print(f"✅ Digest sent to {RECIPIENT_EMAIL}")
 
 
@@ -220,13 +230,19 @@ def main():
 
     print(f"📅 Searching for emails after {after_date_str}")
 
-    service = get_gmail_service()
-    emails  = fetch_emails(service, after_date_str)
+    service  = get_gmail_service()
+    label_id = get_label_id(service, NEWSLETTER_LABEL)
+    emails   = fetch_emails(service, after_date_str)
 
     print(f"📬 Found {len(emails)} emails to analyze")
 
     html_body = generate_digest(emails, date_range_str)
     send_digest_email(service, html_body, today)
+
+    message_ids = [e["id"] for e in emails]
+    if message_ids:
+        move_to_newsletters(service, message_ids, label_id)
+
     save_last_run_date(today)
 
 
