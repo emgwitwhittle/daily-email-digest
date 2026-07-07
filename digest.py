@@ -1,7 +1,7 @@
 """
 Daily Email Digest
-Reads Gmail newsletters, summarizes via Claude API, sends digest to Elizabeth,
-then moves processed emails to the Newsletters label.
+Fetches emails matching Tools or To Read criteria, summarizes via Claude API,
+sends digest to Elizabeth, then files each email into the correct Gmail label.
 """
 
 import os
@@ -19,18 +19,59 @@ from googleapiclient.discovery import build
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-RECIPIENT_EMAIL  = "elizabeth@wit-whittle.com"
-SENDER_NAME      = "Daily Digest"
-LOOKBACK_DAYS    = 3
-MAX_EMAILS       = 50
-STATE_FILE       = "last_run.txt"
-NEWSLETTER_LABEL = "Newsletters"
+RECIPIENT_EMAIL = "elizabeth@wit-whittle.com"
+SENDER_NAME     = "Daily Digest"
+LOOKBACK_DAYS   = 3
+MAX_EMAILS      = 50
+STATE_FILE      = "last_run.txt"
 
 GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/gmail.modify",
 ]
+
+# ── Split inbox definitions ───────────────────────────────────────────────────
+
+TOOLS_SENDERS = [
+    "contact@mail.replit.com",
+    "newsletter@mail.bubble.io",
+    "make.com",
+    "send.relay.app",
+    "support@mail.anthropic.com",
+    "sam@twimlai.com",
+    "hello@cognitoforms.com",
+    "teamzoom@e.zoom.us",
+    "changelog@neon.tech",
+    "support@rapidapi.com",
+    "mail@sendfoxmail.com",
+    "chartgen@chartgen.ai",
+    "otterly.ai",
+    "octomind.dev",
+    "xano.com",
+    "marie@tally.so",
+    "hello@gamma.app",
+    "ivan@mail.notion.so",
+    "maestroai@substack.com",
+    "no-reply@github.com",
+    "hello@news.railway.app",
+    "noreply@lovable.dev",
+    "team@e.mylens.ai",
+    "no-reply@email.claude.com",
+    "hello@apify.com",
+]
+
+TO_READ_SENDERS = [
+    "newsletter@createwith.com",
+    "tldrnewsletter.com",
+    "digest.producthunt.com",
+    "lenny+how-i-ai@substack.com",
+    "lenny@substack.com",
+    "earnestsweat+field-notes@substack.com",
+    "earnestsweat@substack.com",
+]
+
+TO_READ_SUBJECTS = ["agentic"]
 
 # ── Gmail helpers ─────────────────────────────────────────────────────────────
 
@@ -54,7 +95,30 @@ def get_label_id(service, label_name):
     for label in results.get("labels", []):
         if label["name"].lower() == label_name.lower():
             return label["id"]
-    raise ValueError(f"Label '{label_name}' not found in Gmail. Please create it first.")
+    raise ValueError(f"Label '{label_name}' not found in Gmail.")
+
+
+def build_gmail_query(after_date_str):
+    """Build a Gmail search query matching Tools OR To Read criteria."""
+    tools_from = " OR ".join(f"from:{s}" for s in TOOLS_SENDERS)
+    to_read_from = " OR ".join(f"from:{s}" for s in TO_READ_SENDERS)
+    to_read_subjects = " OR ".join(f"subject:{s}" for s in TO_READ_SUBJECTS)
+
+    combined = f"({tools_from}) OR ({to_read_from}) OR ({to_read_subjects})"
+    return f"after:{after_date_str} -in:sent -in:drafts ({combined})"
+
+
+def classify_email(from_addr, subject):
+    """Return 'tools' or 'to_read' based on sender/subject."""
+    from_lower = from_addr.lower()
+    for sender in TOOLS_SENDERS:
+        if sender.lower() in from_lower:
+            return "tools"
+    subject_lower = subject.lower()
+    for kw in TO_READ_SUBJECTS:
+        if kw.lower() in subject_lower:
+            return "to_read"
+    return "to_read"  # default for To Read senders
 
 
 def get_message_body(msg_data):
@@ -87,7 +151,8 @@ def get_message_body(msg_data):
 
 
 def fetch_emails(service, after_date_str):
-    query = f"after:{after_date_str} -in:sent -in:drafts"
+    """Fetch only emails matching Tools or To Read criteria."""
+    query = build_gmail_query(after_date_str)
     results = service.users().messages().list(
         userId="me", q=query, maxResults=MAX_EMAILS
     ).execute()
@@ -101,33 +166,46 @@ def fetch_emails(service, after_date_str):
         ).execute()
 
         headers = {h["name"]: h["value"] for h in msg_data.get("payload", {}).get("headers", [])}
-        body    = get_message_body(msg_data)
+        from_addr = headers.get("From", "")
+        subject   = headers.get("Subject", "(no subject)")
+        body      = get_message_body(msg_data)
 
         if len(body) > 4000:
             body = body[:4000] + "\n\n[truncated]"
 
         emails.append({
-            "id":      m["id"],
-            "subject": headers.get("Subject", "(no subject)"),
-            "from":    headers.get("From", "(unknown sender)"),
-            "date":    headers.get("Date", ""),
-            "body":    body,
+            "id":       m["id"],
+            "subject":  subject,
+            "from":     from_addr,
+            "date":     headers.get("Date", ""),
+            "body":     body,
+            "category": classify_email(from_addr, subject),
         })
 
     return emails
 
 
-def move_to_newsletters(service, message_ids, label_id):
-    for msg_id in message_ids:
+def file_emails(service, emails, tools_label_id, newsletters_label_id):
+    """File each email into Tools or Newsletters label and remove from inbox."""
+    tools_count = 0
+    newsletters_count = 0
+
+    for email in emails:
+        label_id = tools_label_id if email["category"] == "tools" else newsletters_label_id
         service.users().messages().modify(
             userId="me",
-            id=msg_id,
+            id=email["id"],
             body={
                 "addLabelIds":    [label_id],
                 "removeLabelIds": ["INBOX"],
             }
         ).execute()
-    print(f"📁 Moved {len(message_ids)} emails to Newsletters label")
+        if email["category"] == "tools":
+            tools_count += 1
+        else:
+            newsletters_count += 1
+
+    print(f"📁 Filed {tools_count} emails to Tools, {newsletters_count} to Newsletters")
 
 
 # ── Date state helpers ────────────────────────────────────────────────────────
@@ -154,12 +232,9 @@ DIGEST_PROMPT = """You are creating a daily email digest for Elizabeth (elizabet
 
 Below is a list of emails received since the last digest. Your job is to:
 
-1. Filter to newsletters, digests, blog updates, product announcements, and industry news.
-   Skip: transactional emails, direct personal messages, calendar invites, spam, and any banking or financial institution emails.
+1. Analyze and group topics. Flag any topic or theme that appears in 2 or more different sources.
 
-2. Analyze and group topics. Flag any topic or theme that appears in 2 or more different sources.
-
-3. Organize the digest into three sections:
+2. Organize the digest into three sections:
 
    🔥 Top Stories — Items highly relevant to Elizabeth's primary interests (AI / Tech / No-code tools / Higher education),
    OR items appearing in multiple sources. List the 5-8 most important with:
@@ -168,20 +243,19 @@ Below is a list of emails received since the last digest. Your job is to:
    - Which source(s) covered it (sender name and email)
    - A link if one was included in the email
 
-   📡 Cross-Source Signals — Topics mentioned by 2+ newsletters. Brief note on what's being said and why multiple sources care.
+   📡 Cross-Source Signals — Topics mentioned by 2+ sources. Brief note on what's being said and why multiple sources care.
 
-   📬 Everything Else — Compact list of other newsletters. For each: sender name, sender email, one-line summary, link if available.
+   📬 Everything Else — Compact list of remaining emails. For each: sender name, sender email, one-line summary, link if available.
 
-4. Format as clean readable HTML — good font, clear section headers, subtle color, links styled as clickable.
+3. Format as clean readable HTML — good font, clear section headers, subtle color, links styled as clickable.
    Keep it scannable. Elizabeth should read the whole thing in under 5 minutes.
 
-5. At the top, note the date range covered.
+4. At the top, note the date range covered.
 
 Constraints:
 - Summaries and key points only — no full article text.
-- No banking or financial emails anywhere.
 - Always show sender name and email for every item.
-- If fewer than 3 newsletters found, note that and still produce the digest.
+- If fewer than 3 emails found, note that and still produce the digest.
 
 Here are the emails:
 
@@ -191,7 +265,7 @@ Here are the emails:
 
 def generate_digest(emails, date_range_str):
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    emails_for_claude = [{k: v for k, v in e.items() if k != "id"} for e in emails]
+    emails_for_claude = [{k: v for k, v in e.items() if k not in ("id", "category")} for e in emails]
     emails_json = json.dumps(emails_for_claude, indent=2)
     prompt = DIGEST_PROMPT.format(emails_json=emails_json)
 
@@ -230,18 +304,19 @@ def main():
 
     print(f"📅 Searching for emails after {after_date_str}")
 
-    service  = get_gmail_service()
-    label_id = get_label_id(service, NEWSLETTER_LABEL)
-    emails   = fetch_emails(service, after_date_str)
+    service             = get_gmail_service()
+    tools_label_id      = get_label_id(service, "Tools")
+    newsletters_label_id = get_label_id(service, "Newsletters")
+    emails              = fetch_emails(service, after_date_str)
 
-    print(f"📬 Found {len(emails)} emails to analyze")
+    print(f"📬 Found {len(emails)} emails to process")
 
-    html_body = generate_digest(emails, date_range_str)
-    send_digest_email(service, html_body, today)
-
-    message_ids = [e["id"] for e in emails]
-    if message_ids:
-        move_to_newsletters(service, message_ids, label_id)
+    if emails:
+        html_body = generate_digest(emails, date_range_str)
+        send_digest_email(service, html_body, today)
+        file_emails(service, emails, tools_label_id, newsletters_label_id)
+    else:
+        print("No matching emails found — skipping digest.")
 
     save_last_run_date(today)
 
