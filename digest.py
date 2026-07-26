@@ -99,17 +99,14 @@ def get_label_id(service, label_name):
 
 
 def build_gmail_query(after_date_str):
-    """Build a Gmail search query matching Tools OR To Read criteria."""
     tools_from = " OR ".join(f"from:{s}" for s in TOOLS_SENDERS)
     to_read_from = " OR ".join(f"from:{s}" for s in TO_READ_SENDERS)
     to_read_subjects = " OR ".join(f"subject:{s}" for s in TO_READ_SUBJECTS)
-
     combined = f"({tools_from}) OR ({to_read_from}) OR ({to_read_subjects})"
     return f"after:{after_date_str} -in:sent -in:drafts ({combined})"
 
 
 def classify_email(from_addr, subject):
-    """Return 'tools' or 'to_read' based on sender/subject."""
     from_lower = from_addr.lower()
     for sender in TOOLS_SENDERS:
         if sender.lower() in from_lower:
@@ -118,7 +115,7 @@ def classify_email(from_addr, subject):
     for kw in TO_READ_SUBJECTS:
         if kw.lower() in subject_lower:
             return "to_read"
-    return "to_read"  # default for To Read senders
+    return "to_read"
 
 
 def get_message_body(msg_data):
@@ -151,7 +148,6 @@ def get_message_body(msg_data):
 
 
 def fetch_emails(service, after_date_str):
-    """Fetch only emails matching Tools or To Read criteria."""
     query = build_gmail_query(after_date_str)
     results = service.users().messages().list(
         userId="me", q=query, maxResults=MAX_EMAILS
@@ -186,7 +182,6 @@ def fetch_emails(service, after_date_str):
 
 
 def file_emails(service, emails, tools_label_id, newsletters_label_id):
-    """File each email into Tools or Newsletters label and remove from inbox."""
     tools_count = 0
     newsletters_count = 0
 
@@ -230,34 +225,63 @@ def save_last_run_date(date_obj):
 
 DIGEST_PROMPT = """You are creating a daily email digest for Elizabeth (elizabeth@wit-whittle.com).
 
-Below is a list of emails received since the last digest. Your job is to:
+You will receive two types of emails:
+- "to_read" emails: editorial newsletters and curated content (TLDR, Product Hunt, Lenny's Newsletter, etc.)
+- "tools" emails: vendor updates from software companies Elizabeth uses (product announcements, changelogs, feature releases)
 
-1. Analyze and group topics. Flag any topic or theme that appears in 2 or more different sources.
+Produce a digest with FOUR sections in this exact order. Each email appears in exactly ONE section — no duplicates across sections.
 
-2. Organize the digest into three sections:
+---
 
-   🔥 Top Stories — Items highly relevant to Elizabeth's primary interests (AI / Tech / No-code tools / Higher education),
-   OR items appearing in multiple sources. List the 5-8 most important with:
-   - Topic headline
-   - Why it matters in 1-2 sentences
-   - Which source(s) covered it (sender name and email)
-   - A link if one was included in the email
+## 📰 Today's Biggest Stories
+What's actually happening in the world right now, based purely on coverage volume and significance — NOT filtered by Elizabeth's interests.
 
-   📡 Cross-Source Signals — Topics mentioned by 2+ sources. Brief note on what's being said and why multiple sources care.
+- Identify the 3-5 topics most covered across the "to_read" emails
+- For each: one headline, 1-2 sentences on why it matters broadly, which sources covered it (name + email), and a link if available
+- This section is interest-agnostic — it reflects what the world is talking about
+- Only use "to_read" emails for this section
+- Do NOT repeat these items in any later section
 
-   📬 Everything Else — Compact list of remaining emails. For each: sender name, sender email, one-line summary, link if available.
+---
 
-3. Format as clean readable HTML — good font, clear section headers, subtle color, links styled as clickable.
-   Keep it scannable. Elizabeth should read the whole thing in under 5 minutes.
+## 🔥 Relevant to You
+Stories from the "to_read" emails that are directly relevant to Elizabeth's interests: AI, tech, no-code tools, and higher education.
 
-4. At the top, note the date range covered.
+- Only include items NOT already in Today's Biggest Stories
+- For each: topic headline, why it matters to Elizabeth in 1-2 sentences, source (name + email), link if available
+- Limit to 5 items maximum
+- If an item would appear here AND in Today's Biggest Stories, it stays in Today's Biggest Stories only
 
-Constraints:
-- Summaries and key points only — no full article text.
-- Always show sender name and email for every item.
-- If fewer than 3 emails found, note that and still produce the digest.
+---
 
-Here are the emails:
+## 🔧 Vendor Updates
+Product news, feature releases, changelogs, and announcements from the "tools" emails.
+
+- These are vendor-generated updates, not independent editorial coverage
+- For each: vendor name, what changed or launched, in one sentence, link if available
+- Do NOT editorialize or inflate the significance of vendor announcements
+- List all tools emails here — do not move them to other sections
+
+---
+
+## 📬 Everything Else
+Any "to_read" emails not covered in Today's Biggest Stories or Relevant to You.
+
+- One line per item: sender name, sender email, topic, link if available
+- Keep it compact
+
+---
+
+FORMAT RULES:
+- Clean, readable HTML with good typography
+- Subtle color for section headers
+- Links clearly styled as clickable
+- Date range at the very top (e.g. "Covering emails from July 20–24, 2026")
+- Total reading time under 5 minutes
+- Always show sender name and email for every item
+- If a section has no items, omit it entirely rather than showing an empty section
+
+Here are the emails (each includes a "category" field of either "tools" or "to_read"):
 
 {emails_json}
 """
@@ -265,7 +289,7 @@ Here are the emails:
 
 def generate_digest(emails, date_range_str):
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    emails_for_claude = [{k: v for k, v in e.items() if k not in ("id", "category")} for e in emails]
+    emails_for_claude = [{k: v for k, v in e.items() if k != "id"} for e in emails]
     emails_json = json.dumps(emails_for_claude, indent=2)
     prompt = DIGEST_PROMPT.format(emails_json=emails_json)
 
@@ -304,12 +328,12 @@ def main():
 
     print(f"📅 Searching for emails after {after_date_str}")
 
-    service             = get_gmail_service()
-    tools_label_id      = get_label_id(service, "Tools")
+    service              = get_gmail_service()
+    tools_label_id       = get_label_id(service, "Tools")
     newsletters_label_id = get_label_id(service, "Newsletters")
-    emails              = fetch_emails(service, after_date_str)
+    emails               = fetch_emails(service, after_date_str)
 
-    print(f"📬 Found {len(emails)} emails to process")
+    print(f"📬 Found {len(emails)} emails to process ({sum(1 for e in emails if e['category'] == 'tools')} tools, {sum(1 for e in emails if e['category'] == 'to_read')} to_read)")
 
     if emails:
         html_body = generate_digest(emails, date_range_str)
