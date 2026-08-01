@@ -69,6 +69,7 @@ TO_READ_SENDERS = [
     "lenny@substack.com",
     "earnestsweat+field-notes@substack.com",
     "earnestsweat@substack.com",
+    "deeperlearning.producthunt.com",
 ]
 
 TO_READ_SUBJECTS = ["agentic"]
