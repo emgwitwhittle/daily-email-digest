@@ -103,7 +103,7 @@ def build_gmail_query(after_date_str):
     to_read_from = " OR ".join(f"from:{s}" for s in TO_READ_SENDERS)
     to_read_subjects = " OR ".join(f"subject:{s}" for s in TO_READ_SUBJECTS)
     combined = f"({tools_from}) OR ({to_read_from}) OR ({to_read_subjects})"
-    return f"after:{after_date_str} -in:sent -in:drafts ({combined})"
+    return f"after:{after_date_str} in:inbox ({combined})"
 
 
 def classify_email(from_addr, subject):
@@ -166,8 +166,8 @@ def fetch_emails(service, after_date_str):
         subject   = headers.get("Subject", "(no subject)")
         body      = get_message_body(msg_data)
 
-        if len(body) > 4000:
-            body = body[:4000] + "\n\n[truncated]"
+        if len(body) > 6000:
+            body = body[:6000] + "\n\n[truncated]"
 
         emails.append({
             "id":       m["id"],
@@ -225,11 +225,25 @@ def save_last_run_date(date_obj):
 
 DIGEST_PROMPT = """You are creating a daily email digest for Elizabeth (elizabeth@wit-whittle.com).
 
-You will receive two types of emails:
-- "to_read" emails: editorial newsletters and curated content (TLDR, Product Hunt, Lenny's Newsletter, etc.)
-- "tools" emails: vendor updates from software companies Elizabeth uses (product announcements, changelogs, feature releases)
+Elizabeth is a consultant and adjunct instructor at the UW iSchool. Her interests are:
+- Big AI news: major model releases, company moves, industry shifts
+- Non-developers using AI and no-code tools: natural language programming, vibe coding, who can now build software without coding, how AI is changing who can create products
+- Retail and marketing: Meta, TikTok, ads, ecommerce, consumer trends, social commerce
+- Technically-informed product perspective: what AI can and can't do, how it's changing product development, what product managers need to know — content a smart non-coder would find valuable even if it originates from a developer context
 
-Produce a digest with FOUR sections in this exact order. Each email appears in exactly ONE section — no duplicates across sections.
+NOT her interests (skip or deprioritize):
+- Space exploration
+- Pure science/biotech unless directly tied to AI
+- Developer implementation tutorials (how to write code, which library to use, syntax)
+- Pure engineering infrastructure
+
+You will receive two types of emails:
+- "to_read": editorial newsletters and curated content (TLDR, Product Hunt, Lenny's Newsletter, etc.)
+- "tools": vendor updates from software companies Elizabeth uses (product announcements, changelogs, feature releases)
+
+IMPORTANT ON LINKS: Extract the most direct, clean link to the original article or source from each email. Prefer links to the actual article over newsletter tracking links. If no clean link is available, omit the link rather than including a broken or tracking URL.
+
+Produce a digest with FOUR sections in this exact order. Each email or story appears in exactly ONE section — no duplicates.
 
 ---
 
@@ -237,49 +251,49 @@ Produce a digest with FOUR sections in this exact order. Each email appears in e
 What's actually happening in the world right now, based purely on coverage volume and significance — NOT filtered by Elizabeth's interests.
 
 - Identify the 3-5 topics most covered across the "to_read" emails
-- For each: one headline, 1-2 sentences on why it matters broadly, which sources covered it (name + email), and a link if available
+- For each: one clear headline, 1-2 sentences on why it matters broadly, which sources covered it (name + email), and the most direct link to the original source if available
 - This section is interest-agnostic — it reflects what the world is talking about
 - Only use "to_read" emails for this section
-- Do NOT repeat these items in any later section
+- Items here do NOT appear in any later section
 
 ---
 
 ## 🔥 Relevant to You
-Stories from the "to_read" emails that are directly relevant to Elizabeth's interests: AI, tech, no-code tools, and higher education.
+Stories from "to_read" emails relevant to Elizabeth's interests listed above.
 
 - Only include items NOT already in Today's Biggest Stories
-- For each: topic headline, why it matters to Elizabeth in 1-2 sentences, source (name + email), link if available
-- Limit to 5 items maximum
-- If an item would appear here AND in Today's Biggest Stories, it stays in Today's Biggest Stories only
+- For each: clear headline, why it matters to Elizabeth in 1-2 sentences, source (name + email), most direct link to original source if available
+- Include content that a technically-informed non-coder or product manager would value, even if it originates from a developer context — ask "would Elizabeth find this useful?" not "is this written for developers?"
+- Limit to 6 items maximum
+- Skip: space, pure science, developer tutorials, engineering infrastructure
 
 ---
 
 ## 🔧 Vendor Updates
-Product news, feature releases, changelogs, and announcements from the "tools" emails.
+Product news, feature releases, and announcements from "tools" emails.
 
-- These are vendor-generated updates, not independent editorial coverage
-- For each: vendor name, what changed or launched, in one sentence, link if available
+- These are vendor-generated updates, not independent editorial coverage — treat them accordingly
+- For each: vendor name, what changed or launched in one plain sentence, direct link if available
 - Do NOT editorialize or inflate the significance of vendor announcements
-- List all tools emails here — do not move them to other sections
+- List all tools emails here
 
 ---
 
 ## 📬 Everything Else
-Any "to_read" emails not covered in Today's Biggest Stories or Relevant to You.
+Any "to_read" emails not covered above.
 
-- One line per item: sender name, sender email, topic, link if available
-- Keep it compact
+- One line per item: sender name, sender email, topic, direct link if available
 
 ---
 
 FORMAT RULES:
-- Clean, readable HTML with good typography
+- Clean, readable HTML with good typography and generous line spacing
 - Subtle color for section headers
-- Links clearly styled as clickable
-- Date range at the very top (e.g. "Covering emails from July 20–24, 2026")
+- Links clearly styled as clickable blue text
+- Date range at the very top
 - Total reading time under 5 minutes
 - Always show sender name and email for every item
-- If a section has no items, omit it entirely rather than showing an empty section
+- Omit any section that has no items
 
 Here are the emails (each includes a "category" field of either "tools" or "to_read"):
 
@@ -333,7 +347,9 @@ def main():
     newsletters_label_id = get_label_id(service, "Newsletters")
     emails               = fetch_emails(service, after_date_str)
 
-    print(f"📬 Found {len(emails)} emails to process ({sum(1 for e in emails if e['category'] == 'tools')} tools, {sum(1 for e in emails if e['category'] == 'to_read')} to_read)")
+    tools_count   = sum(1 for e in emails if e["category"] == "tools")
+    to_read_count = sum(1 for e in emails if e["category"] == "to_read")
+    print(f"📬 Found {len(emails)} emails ({tools_count} tools, {to_read_count} to_read)")
 
     if emails:
         html_body = generate_digest(emails, date_range_str)
